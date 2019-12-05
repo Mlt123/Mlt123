@@ -1,0 +1,102 @@
+const AWS = require('aws-sdk');
+const s3 = new AWS.S3();
+const crypto = require('crypto');
+const dynamo = new AWS.DynamoDB.DocumentClient({region: 'ap-northeast-1'});
+exports.handler = (event, context, callback) => {
+    var myBucket = 'res-pal-fitting';
+    var table = process.env['U_Table'];
+    var requestBody = JSON.parse(event.body);
+    var relationId = requestBody.RelationId;
+    //get QRCode
+    var md5 = crypto.createHash('md5');
+    //get file name
+    var md5Num = md5.update(relationId, 'binary').digest('hex');
+    var clothes = [];
+    var num = 0;
+    var lage;
+    var params;
+    var urlParams;
+    //var sss={"RelationId":"user_id+L9fPaTq75nAgb_xOrGymcQ+vrcapp","ClothesId":"wer12345"};
+    var tableParams = {
+        ExpressionAttributeValues: {
+            ":v1": relationId
+        },
+        KeyConditionExpression: "RelationId = :v1",
+        TableName: table,
+        ProjectionExpression:"ClothesId",
+        Limit:"10",
+        //ExclusiveStartKey:sss
+        ExclusiveStartKey:requestBody.LastEvaluatedKey
+    };
+    //get clothesid
+    dynamo.query(tableParams, function(err, data) {
+        if (err) {
+            errorResponse('get userClothes fail'+err,context.awsRequestId,callback);
+        }else{
+            lage = data.Items.length-1;
+            var lastEvaluatedKey = data.LastEvaluatedKey;
+            var clothesd;
+            for(var i=0;i<data.Items.length;i++){
+                params = {TableName: process.env['C_Table'],Key: {ClothesId: data.Items[i].ClothesId}};
+                ////get clothes info
+                dynamo.get(params,function(err,data2){
+                    if(err){
+                        errorResponse('get ClothesInfo fail'+err,context.awsRequestId,callback);
+                    }else{
+                        console.log('LastEvaluatedKey'+JSON.stringify(data.LastEvaluatedKey));
+                        //clothes.push(data2);
+                        clothesd = data2;
+                        var fbxUrlKey = md5Num+'/'+md5Num+'+'+data2.Item.ClothesId+'.fbx';
+                        urlParams = {Bucket: myBucket, Key: fbxUrlKey,Expires: 60*5*5};
+                        //get file url
+                        s3.getSignedUrl('getObject', urlParams, function (err, fbxUrl) {
+                            if(err){
+                                errorResponse('get clothesUrl fail'+err,context.awsRequestId,callback);
+                            }else{
+                                clothesd.Item.FbxUrl = fbxUrl;
+                                var jpgUrlKey = md5Num+'/'+md5Num+'+'+data2.Item.ClothesId+'.jpg';
+                                urlParams = {Bucket: myBucket, Key: jpgUrlKey,Expires: 60*5*5};
+                                s3.getSignedUrl('getObject', urlParams, function (err, jpgUrl) {
+                                    if(err){
+                                        errorResponse('get clothesUrl fail'+err,context.awsRequestId,callback);
+                                    }else{
+                                        clothesd.Item.JpgUrl = jpgUrl;
+                                        clothes.push(clothesd);
+                                        console.log('555'+clothes);
+                                        if(num == lage){
+                                            callback(null, {
+                                                statusCode: 201,
+                                                body: JSON.stringify({
+                                                    "Status": 'OK',
+                                                    "Items" : clothes,
+                                                    "LastEvaluatedKey":lastEvaluatedKey
+                                                }),
+                                                headers: {
+                                                    'Access-Control-Allow-Origin': '*',
+                                                },
+                                            });
+                                        }
+                                        num++;
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+        }
+    });
+};
+
+function errorResponse(errorMessage, awsRequestId, callback) {
+    callback(null, {
+        statusCode: 500,
+        body: JSON.stringify({
+            Error: errorMessage,
+            Reference: awsRequestId,
+        }),
+        headers: {
+            'Access-Control-Allow-Origin': '*',
+        },
+    });
+}
